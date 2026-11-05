@@ -2,113 +2,94 @@
 
 English | [Español](README.es.md)
 
-Wake-on-LAN for starting virtual machines and LXC containers on a running Proxmox VE host. The included script and systemd unit reproduce the user's working installation without refactoring.
+Wake-on-LAN to start VMs and LXC containers on an already running Proxmox VE host. The original working wol.sh and systemd unit are preserved.
 
-## How it works
+## Online installation
 
-The script listens on vmbr0 for Ethernet WoL (0x0842) or UDP ports 7 and 9. It extracts a MAC address and searches local VM configurations first, then LXC configurations. If several match, it uses the first. It runs qm start or pct start only when it interprets the status as stopped.
+The following commands require a PUBLIC repository. If it is still private, the unauthenticated download will fail. Run as root in the Proxmox host shell, not inside a guest. curl must already be installed to run these commands:
 
-The host must already be running. This does not power on a physical server or require a script inside the guests. There is a five-second sleep before each capture; packets sent during that interval can be missed.
+```bash
+apt-get update && apt-get install -y curl ca-certificates
+```
 
-Original method: https://forum.proxmox.com/threads/wake-on-lan-wol-for-vms-and-containers.143879/
+Install using vmbr0:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/iecxiv/proxmox-wol/main/wol_install.sh)" -- install
+```
+
+Choose another existing bridge:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/iecxiv/proxmox-wol/main/wol_install.sh)" -- install --interface vmbr1
+```
+
+Uninstall:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/iecxiv/proxmox-wol/main/wol_install.sh)" -- uninstall
+```
+
+These commands execute remote code as root. Review the source first. To avoid starting Bash after a failed download, and to inspect the script before execution, use:
+
+```bash
+curl -fSL https://raw.githubusercontent.com/iecxiv/proxmox-wol/main/wol_install.sh -o /root/wol_install.sh
+# Inspect the downloaded file before executing it:
+less /root/wol_install.sh
+# Only run after a successful download and review:
+bash /root/wol_install.sh install --interface vmbr0
+```
+
+The installer downloads wol.sh and pve-wakeonlan.service from main, installs missing curl/tcpdump dependencies, validates the interface and Bash syntax, backs up existing files under /root/proxmox-wol-backup.*, and installs/enables/restarts the service. On deployment failure it attempts to restore previous files and active/enabled state; review the result manually. Package changes are not rolled back. Service activity is checked, but this does not prove WoL works end to end. The online installer itself has not been tested on your host.
+
+Uninstall removes /root/scripts/wol.sh and /etc/systemd/system/pve-wakeonlan.service after disabling the service. It keeps backups, packages and the downloaded installer. It does not restore an older installation automatically.
 
 ## Files
 
-- wol.sh: complete script with UDP 7 and 9 enabled.
-- pve-wakeonlan.service: systemd unit.
-- fix-wol-port.sh: patch for an existing installation that only listens on UDP 9. Not needed when installing the included wol.sh.
+- wol_install.sh: online install/uninstall entry point.
+- wol.sh: original script listening for Ethernet WoL 0x0842 and UDP 7/9 on vmbr0.
+- pve-wakeonlan.service: systemd service running /root/scripts/wol.sh as root.
+- fix-wol-port.sh: legacy UDP 7 patch; not required for a fresh installation.
 
-## Installation
+## Configuration and testing
 
-Run as root on the Proxmox host. This repository is private: cloning requires authenticated GitHub access. Alternatively, download the files through an authenticated session and copy them to the host.
-
-```bash
-apt update
-apt install -y git tcpdump
-git clone https://github.com/iecxiv/proxmox-wol.git
-cd proxmox-wol
-```
-
-Review wol.sh and replace vmbr0 if necessary. List interfaces:
-
-```bash
-ip -br link
-```
-
-Back up any existing installation before overwriting:
-
-```bash
-STAMP=$(date +%Y%m%d-%H%M%S)
-[ ! -f /root/scripts/wol.sh ] || cp -a /root/scripts/wol.sh "/root/scripts/wol.sh.bak.$STAMP"
-[ ! -f /etc/systemd/system/pve-wakeonlan.service ] || cp -a /etc/systemd/system/pve-wakeonlan.service "/etc/systemd/system/pve-wakeonlan.service.bak.$STAMP"
-```
-
-Install from the repository directory:
-
-```bash
-bash -n wol.sh && \
-install -d -m 700 /root/scripts && \
-install -m 700 wol.sh /root/scripts/wol.sh && \
-install -m 644 pve-wakeonlan.service /etc/systemd/system/pve-wakeonlan.service && \
-systemctl daemon-reload && \
-systemctl enable pve-wakeonlan.service && \
-systemctl restart pve-wakeonlan.service
-
-systemctl status pve-wakeonlan.service --no-pager -l
-```
-
-## Testing
-
-Use the MAC configured on the target VM or LXC interface, not the host MAC or an auxiliary bridge-interface MAC. Replace 123 with the actual guest ID:
+List available interfaces with ip -br link. The installer changes the interface in the installed copy, not the repository original. Use the MAC configured in the target VM/LXC, not the host or auxiliary interface MAC. Replace 123 with the actual guest ID:
 
 ```bash
 qm config 123
-# For an LXC container:
+# For LXC:
 pct config 123
+systemctl status pve-wakeonlan --no-pager -l
+journalctl -fu pve-wakeonlan
 ```
 
-With the target guest stopped, send WoL from a device on the network using UDP 7 or 9 and the appropriate broadcast address. Repeat the request if it coincides with the five-second sleep. Watch the logs:
-
-```bash
-journalctl -fu pve-wakeonlan.service
-```
-
-In another terminal, capture packets while sending WoL:
+With the guest stopped, send a magic packet from the network to its configured MAC using UDP 7 or 9 and the appropriate broadcast address. Capture in another terminal (adapt vmbr0 if needed):
 
 ```bash
 tcpdump -ni vmbr0 -e -vv -XX '(ether proto 0x0842) or (udp port 7) or (udp port 9)'
 ```
 
-## Troubleshooting and limitations
+## How it works and limitations
 
-- In the tested installation, incoming WoL used UDP 7 while the original filter only accepted UDP 9. Adding UDP 7 fixed it.
-- No captured packets: check the interface, port and sender configuration.
-- A captured MAC followed by 0 found: check the target MAC against guest configurations on this node.
-- Empty or incorrect MAC: inspect the sed parser. It relies on a fixed position in tcpdump hexadecimal output and does not fully validate the magic packet.
-- Unquoted expansions from the original script are preserved, including the MAC passed to grep. An empty MAC is not safely handled. This is a working contributed version, not a hardened implementation.
-- tcpdump errors are suppressed with 2>/dev/null.
-- The script searches local configuration paths; it does not implement remote guest startup across cluster nodes.
-- It runs as root and does not authenticate WoL requests. Use only on a trusted network and do not expose it to the Internet. The sleep is not complete abuse protection.
+The script extracts a MAC from tcpdump output, searches local VM configurations first and then LXC configurations, and starts the first match if it interprets its state as stopped. The physical host must be on. It does not implement cross-node startup.
 
-## Manual restore
+There is a five-second sleep before each capture; repeat requests if necessary. The sed parser relies on a fixed output position and does not fully validate magic packets. Original unquoted expansions are preserved; an empty MAC is not safely handled. tcpdump errors are hidden. This is a working contributed script, not a hardened implementation. Use only on trusted networks; requests are not authenticated and the service runs as root. Do not expose it to the Internet.
 
-Replace the example backup names with your actual backup files:
+If no packets appear, check the sender, interface and port. If a MAC appears but the log says 0 found, compare it with local guest configurations. The original problem was UDP 7 packets being ignored by a UDP-9-only filter.
+
+## Manual recovery
+
+Choose the actual backup directory. It contains previous files only if they existed before installation. Stop the service, restore those files, reload systemd and restore the desired state:
 
 ```bash
-systemctl stop pve-wakeonlan.service
-cp -a /root/scripts/wol.sh.bak.YYYYMMDD-HHMMSS /root/scripts/wol.sh
-cp -a /etc/systemd/system/pve-wakeonlan.service.bak.YYYYMMDD-HHMMSS /etc/systemd/system/pve-wakeonlan.service
+systemctl stop pve-wakeonlan
+# Replace BACKUP_DIR below with the real directory:
+cp -a BACKUP_DIR/wol.sh /root/scripts/wol.sh
+cp -a BACKUP_DIR/pve-wakeonlan.service /etc/systemd/system/pve-wakeonlan.service
 systemctl daemon-reload
-systemctl restart pve-wakeonlan.service
+systemctl restart pve-wakeonlan
 ```
 
-## Uninstall
+Review state.txt in the backup for the previous active/enabled state.
 
-These commands remove the installed service and script, but keep backups and the repository:
-
-```bash
-systemctl disable --now pve-wakeonlan.service
-rm -f /etc/systemd/system/pve-wakeonlan.service
-rm -f /root/scripts/wol.sh
-systemctl daemon-reload
-```
+Original method: https://forum.proxmox.com/threads/wake-on-lan-wol-for-vms-and-containers.143879/
