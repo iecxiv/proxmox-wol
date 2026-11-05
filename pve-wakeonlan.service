@@ -1,0 +1,12 @@
+[Unit]
+Description=Wake-on-LAN for Proxmox Virtual Environments
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+User=root
+ExecStart=/root/scripts/wol.sh
+
+[Install]
+WantedBy=multi-user.target
